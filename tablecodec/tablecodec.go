@@ -43,6 +43,7 @@ const (
 	RecordRowKeyLen       = prefixLen + idLen /*handle*/
 	tablePrefixLength     = 1
 	recordPrefixSepLength = 2
+	indexPrefixSepLength  = 2
 )
 
 // TableSplitKeyLen is the length of key 't{table_id}' which is used for table split.
@@ -54,6 +55,9 @@ func TablePrefix() []byte {
 }
 
 // appendTableRecordPrefix appends table record prefix  "t[tableID]_r".
+/*
+t[tableID]_r -> buf
+*/
 func appendTableRecordPrefix(buf []byte, tableID int64) []byte {
 	buf = append(buf, tablePrefix...)
 	buf = codec.EncodeInt(buf, tableID)
@@ -62,6 +66,9 @@ func appendTableRecordPrefix(buf []byte, tableID int64) []byte {
 }
 
 // EncodeRowKeyWithHandle encodes the table id, row handle into a kv.Key
+/*
+t[tableID]_r[handleID] -> key
+*/
 func EncodeRowKeyWithHandle(tableID int64, handle int64) kv.Key {
 	buf := make([]byte, 0, RecordRowKeyLen)
 	buf = appendTableRecordPrefix(buf, tableID)
@@ -71,11 +78,29 @@ func EncodeRowKeyWithHandle(tableID int64, handle int64) kv.Key {
 
 // DecodeRecordKey decodes the key and gets the tableID, handle.
 func DecodeRecordKey(key kv.Key) (tableID int64, handle int64, err error) {
-	/* Your code here */
+	if len(key) != RecordRowKeyLen || !hasTablePrefix(key) || !hasRecordPrefixSep(key[prefixLen-2:]) {
+		err = errInvalidKey.GenWithStack("invalid key - %q", key)
+		return
+	}
+	var remain []byte
+	if remain, tableID, err = codec.DecodeInt(key[len(tablePrefix):]); err != nil {
+		return
+	}
+	if remain, handle, err = codec.DecodeInt(remain[recordPrefixSepLength:]); err != nil {
+		return
+	}
+	if len(remain) != 0 {
+		err = errInvalidKey.GenWithStack("invalid key - %q", key)
+		return
+	}
 	return
+
 }
 
 // appendTableIndexPrefix appends table index prefix  "t[tableID]_i".
+/*
+t[tableID]_i -> buf
+*/
 func appendTableIndexPrefix(buf []byte, tableID int64) []byte {
 	buf = append(buf, tablePrefix...)
 	buf = codec.EncodeInt(buf, tableID)
@@ -84,6 +109,9 @@ func appendTableIndexPrefix(buf []byte, tableID int64) []byte {
 }
 
 // EncodeIndexSeekKey encodes an index value to kv.Key.
+/*
+t[tableID]_i[indexID]indexValues -> key
+*/
 func EncodeIndexSeekKey(tableID int64, idxID int64, encodedValue []byte) kv.Key {
 	key := make([]byte, 0, prefixLen+idLen+len(encodedValue))
 	key = appendTableIndexPrefix(key, tableID)
@@ -93,12 +121,27 @@ func EncodeIndexSeekKey(tableID int64, idxID int64, encodedValue []byte) kv.Key 
 }
 
 // DecodeIndexKeyPrefix decodes the key and gets the tableID, indexID, indexValues.
+/*
+key -> t[tableID]_i[indexID]indexValues
+*/
 func DecodeIndexKeyPrefix(key kv.Key) (tableID int64, indexID int64, indexValues []byte, err error) {
-	/* Your code here */
-	return tableID, indexID, indexValues, nil
+	if len(key) < RecordRowKeyLen || !hasTablePrefix(key) || !hasIndexPrefixSep(key[prefixLen-2:]) {
+		err = errInvalidKey.GenWithStack("invalid key - %q", key)
+		return
+	}
+	if indexValues, tableID, err = codec.DecodeInt(key[len(tablePrefix):]); err != nil {
+		return
+	}
+	if indexValues, indexID, err = codec.DecodeInt(indexValues[indexPrefixSepLength:]); err != nil {
+		return
+	}
+	return
 }
 
 // DecodeIndexKey decodes the key and gets the tableID, indexID, indexValues.
+/*
+key -> t[tableID]_i[indexID]indexValues[]
+*/
 func DecodeIndexKey(key kv.Key) (tableID int64, indexID int64, indexValues []string, err error) {
 	k := key
 
@@ -134,6 +177,7 @@ func EncodeRow(sc *stmtctx.StatementContext, row []types.Datum, colIDs []int64, 
 }
 
 // EncodeRowKey encodes the table id and record handle into a kv.Key
+/* t[tableID]_r[handle] -> key */
 func EncodeRowKey(tableID int64, encodedHandle []byte) kv.Key {
 	buf := make([]byte, 0, RecordRowKeyLen)
 	buf = appendTableRecordPrefix(buf, tableID)
@@ -142,11 +186,13 @@ func EncodeRowKey(tableID int64, encodedHandle []byte) kv.Key {
 }
 
 // CutRowKeyPrefix cuts the row key prefix.
+/* key(t[tableID]_[r|i]xxx) -> xxx */
 func CutRowKeyPrefix(key kv.Key) []byte {
 	return key[prefixLen:]
 }
 
 // EncodeRecordKey encodes the recordPrefix, row handle into a kv.Key.
+/* recordPrefix(t[tableID]_r) + handle -> key */
 func EncodeRecordKey(recordPrefix kv.Key, h int64) kv.Key {
 	buf := make([]byte, 0, len(recordPrefix)+idLen)
 	buf = append(buf, recordPrefix...)
@@ -154,12 +200,19 @@ func EncodeRecordKey(recordPrefix kv.Key, h int64) kv.Key {
 	return buf
 }
 
+/* 't' */
 func hasTablePrefix(key kv.Key) bool {
 	return key[0] == tablePrefix[0]
 }
 
+/* _r */
 func hasRecordPrefixSep(key kv.Key) bool {
 	return key[0] == recordPrefixSep[0] && key[1] == recordPrefixSep[1]
+}
+
+/* _i */
+func hasIndexPrefixSep(key kv.Key) bool {
+	return key[0] == indexPrefixSep[0] && key[1] == indexPrefixSep[1]
 }
 
 // DecodeMetaKey decodes the key and get the meta key and meta field.
@@ -220,6 +273,7 @@ func DecodeKeyHead(key kv.Key) (tableID int64, indexID int64, isRecordKey bool, 
 }
 
 // DecodeTableID decodes the table ID of the key, if the key is not table key, returns 0.
+/* key -> tableID */
 func DecodeTableID(key kv.Key) int64 {
 	if !key.HasPrefix(tablePrefix) {
 		return 0
@@ -232,6 +286,7 @@ func DecodeTableID(key kv.Key) int64 {
 }
 
 // DecodeRowKey decodes the key and gets the handle.
+/* key(t[tableID]_r[handleID]) -> handleID  */
 func DecodeRowKey(key kv.Key) (int64, error) {
 	if len(key) != RecordRowKeyLen || !hasTablePrefix(key) || !hasRecordPrefixSep(key[prefixLen-2:]) {
 		return 0, errInvalidKey.GenWithStack("invalid key - %q", key)
@@ -454,6 +509,7 @@ func DecodeIndexHandle(key, value []byte, colsLen int, pkTp *types.FieldType) (i
 }
 
 // DecodeIndexValueAsHandle uses to decode index value as handle id.
+/* data -> handle */
 func DecodeIndexValueAsHandle(data []byte) (int64, error) {
 	var h int64
 	buf := bytes.NewBuffer(data)
@@ -462,6 +518,7 @@ func DecodeIndexValueAsHandle(data []byte) (int64, error) {
 }
 
 // EncodeTableIndexPrefix encodes index prefix with tableID and idxID.
+/* tableID, indexID -> t[tableID]_i[IndexID] --> key*/
 func EncodeTableIndexPrefix(tableID, idxID int64) kv.Key {
 	key := make([]byte, 0, prefixLen)
 	key = appendTableIndexPrefix(key, tableID)
@@ -470,6 +527,7 @@ func EncodeTableIndexPrefix(tableID, idxID int64) kv.Key {
 }
 
 // EncodeTablePrefix encodes table prefix with table ID.
+/* t[tableID] -> key */
 func EncodeTablePrefix(tableID int64) kv.Key {
 	var key kv.Key
 	key = append(key, tablePrefix...)
@@ -478,6 +536,7 @@ func EncodeTablePrefix(tableID int64) kv.Key {
 }
 
 // ReplaceRecordKeyTableID replace the tableID in the recordKey buf.
+/* t[tableID1] -> t[tableID2] */
 func ReplaceRecordKeyTableID(buf []byte, tableID int64) []byte {
 	if len(buf) < len(tablePrefix)+8 {
 		return buf
@@ -489,18 +548,21 @@ func ReplaceRecordKeyTableID(buf []byte, tableID int64) []byte {
 }
 
 // GenTableRecordPrefix composes record prefix with tableID: "t[tableID]_r".
+/* t[tableID]_r -> key */
 func GenTableRecordPrefix(tableID int64) kv.Key {
 	buf := make([]byte, 0, len(tablePrefix)+8+len(recordPrefixSep))
 	return appendTableRecordPrefix(buf, tableID)
 }
 
 // GenTableIndexPrefix composes index prefix with tableID: "t[tableID]_i".
+/* t[tableID]_i -> key */
 func GenTableIndexPrefix(tableID int64) kv.Key {
 	buf := make([]byte, 0, len(tablePrefix)+8+len(indexPrefixSep))
 	return appendTableIndexPrefix(buf, tableID)
 }
 
 // IsIndexKey is used to check whether the key is an index key.
+/* "t"(1B)|tableID(8B)|"_i"(2B) */
 func IsIndexKey(k []byte) bool {
 	return len(k) > 11 && k[0] == 't' && k[10] == 'i'
 }
@@ -514,6 +576,7 @@ func IsUntouchedIndexKValue(k, v []byte) bool {
 }
 
 // GenTablePrefix composes table record and index prefix: "t[tableID]".
+/* t[tableID] -> buf */
 func GenTablePrefix(tableID int64) kv.Key {
 	buf := make([]byte, 0, len(tablePrefix)+8)
 	buf = append(buf, tablePrefix...)
@@ -522,6 +585,7 @@ func GenTablePrefix(tableID int64) kv.Key {
 }
 
 // TruncateToRowKeyLen truncates the key to row key length if the key is longer than row key.
+/* key[:RecordRowKeyLen] -> key */
 func TruncateToRowKeyLen(key kv.Key) kv.Key {
 	if len(key) > RecordRowKeyLen {
 		return key[:RecordRowKeyLen]
@@ -530,6 +594,7 @@ func TruncateToRowKeyLen(key kv.Key) kv.Key {
 }
 
 // GetTableHandleKeyRange returns table handle's key range with tableID.
+/* t[tableID]_r[minInt],t[tableID]_r[maxInt] -> startKey, endKey */
 func GetTableHandleKeyRange(tableID int64) (startKey, endKey []byte) {
 	startKey = EncodeRowKeyWithHandle(tableID, math.MinInt64)
 	endKey = EncodeRowKeyWithHandle(tableID, math.MaxInt64)
@@ -537,6 +602,7 @@ func GetTableHandleKeyRange(tableID int64) (startKey, endKey []byte) {
 }
 
 // GetTableIndexKeyRange returns table index's key range with tableID and indexID.
+/* t[tableID]_i[indexID], t[tableID]_i[indexID]255 -> startKey, endKey */
 func GetTableIndexKeyRange(tableID, indexID int64) (startKey, endKey []byte) {
 	startKey = EncodeIndexSeekKey(tableID, indexID, nil)
 	endKey = EncodeIndexSeekKey(tableID, indexID, []byte{255})
